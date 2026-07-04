@@ -8,6 +8,7 @@ Full-stack HRMS built from the supplied PDF requirements. It includes:
 - Daily attendance check-in/check-out plus admin attendance management.
 - Leave application and live admin approval/rejection.
 - Payroll visibility for employees and salary updates for admins.
+- Direct profile photo upload from the laptop.
 - MySQL schema creation and seed data on server startup.
 
 ## Requirements
@@ -49,3 +50,5 @@ Password: Employee@12345
 The schema is also available in `database/schema.sql` if you want to inspect or run it manually.
 
 Update database settings in `.env`.
+
+`APP_TIMEZONE=Asia/Kolkata` controls the real-world day and time used for check-in/check-out.

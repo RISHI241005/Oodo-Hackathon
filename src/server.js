@@ -6,6 +6,7 @@ const mysql = require("mysql2/promise");
 
 const ROOT = path.join(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
+const UPLOAD_DIR = path.join(PUBLIC_DIR, "uploads");
 
 loadEnv(path.join(ROOT, ".env"));
 
@@ -19,9 +20,11 @@ const config = {
     database: process.env.DB_NAME || "hrms_live",
     waitForConnections: true,
     connectionLimit: 10,
-    namedPlaceholders: true
+    namedPlaceholders: true,
+    dateStrings: true
   },
-  sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 12)
+  sessionTtlHours: Number(process.env.SESSION_TTL_HOURS || 12),
+  timezone: process.env.APP_TIMEZONE || "Asia/Kolkata"
 };
 
 let pool;
@@ -67,7 +70,7 @@ async function readJson(req) {
     let body = "";
     req.on("data", chunk => {
       body += chunk;
-      if (body.length > 1_000_000) {
+      if (body.length > 8_000_000) {
         req.destroy();
         reject(new Error("Request body too large"));
       }
@@ -81,6 +84,42 @@ async function readJson(req) {
       }
     });
   });
+}
+
+function localNowParts() {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: config.timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(new Date()).map(part => [part.type, part.value]));
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    datetime: `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`
+  };
+}
+
+function normalizeDateTimeInput(value) {
+  if (!value) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  return text.length === 16 ? `${text.replace("T", " ")}:00` : text.replace("T", " ");
+}
+
+function addDays(dateText, days) {
+  const [year, month, day] = String(dateText).slice(0, 10).split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return formatLocalDate(date);
+}
+
+function formatLocalDate(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function requireFields(body, fields) {
@@ -127,6 +166,8 @@ async function auth(req) {
 }
 
 async function initDatabase() {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
   const bootstrap = await mysql.createConnection({
     host: config.db.host,
     port: config.db.port,
@@ -184,8 +225,8 @@ async function initDatabase() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       employee_id INT NOT NULL,
       work_date DATE NOT NULL,
-      check_in DATETIME NULL,
-      check_out DATETIME NULL,
+      check_in DATETIME(3) NULL,
+      check_out DATETIME(3) NULL,
       status ENUM('present', 'absent', 'half-day', 'leave') NOT NULL DEFAULT 'present',
       remarks VARCHAR(255) DEFAULT '',
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -193,6 +234,9 @@ async function initDatabase() {
       FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
     )
   `);
+
+  await pool.query("ALTER TABLE attendance MODIFY check_in DATETIME(3) NULL").catch(() => {});
+  await pool.query("ALTER TABLE attendance MODIFY check_out DATETIME(3) NULL").catch(() => {});
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leave_requests (
@@ -417,10 +461,22 @@ async function routeApi(req, res, url) {
     return ok(res, { message: "Profile updated.", profile: await getProfile(employeeId) });
   }
 
+  if (method === "POST" && pathName === "/api/profile/photo") {
+    const body = await readJson(req);
+    const employeeId = getVisibleEmployeeId(url, user);
+    if (employeeId !== user.employee_id) assertAdmin(user);
+    requireFields(body, ["fileName", "dataUrl"]);
+    const photoPath = await saveProfilePhoto(body.fileName, body.dataUrl, employeeId);
+    await pool.execute("UPDATE employees SET profile_picture = :photoPath WHERE id = :employeeId", { photoPath, employeeId });
+    return ok(res, { message: "Profile photo uploaded.", profilePicture: photoPath });
+  }
+
   if (method === "GET" && pathName === "/api/employees") {
     assertAdmin(user);
     const [employees] = await pool.query(
-      `SELECT e.*, u.employee_code, u.email, u.role
+      `SELECT e.id, e.user_id, e.full_name, e.phone, e.address, e.department, e.designation,
+              DATE_FORMAT(e.joining_date, '%Y-%m-%d') AS joining_date,
+              e.profile_picture, e.documents, u.employee_code, u.email, u.role
          FROM employees e
          JOIN users u ON u.id = e.user_id
         ORDER BY e.full_name`
@@ -431,7 +487,11 @@ async function routeApi(req, res, url) {
   if (method === "GET" && pathName === "/api/attendance") {
     const employeeId = getVisibleEmployeeId(url, user);
     const [rows] = await pool.execute(
-      `SELECT a.*, e.full_name, u.employee_code
+      `SELECT a.id, a.employee_id,
+              DATE_FORMAT(a.work_date, '%Y-%m-%d') AS work_date,
+              DATE_FORMAT(a.check_in, '%Y-%m-%d %H:%i:%s') AS check_in,
+              DATE_FORMAT(a.check_out, '%Y-%m-%d %H:%i:%s') AS check_out,
+              a.status, a.remarks, a.updated_at, e.full_name, u.employee_code
          FROM attendance a
          JOIN employees e ON e.id = a.employee_id
          JOIN users u ON u.id = e.user_id
@@ -449,21 +509,30 @@ async function routeApi(req, res, url) {
   }
 
   if (method === "POST" && pathName === "/api/attendance/check-in") {
+    const now = localNowParts();
     await pool.execute(
       `INSERT INTO attendance (employee_id, work_date, check_in, status, remarks)
-       VALUES (:employeeId, CURRENT_DATE, NOW(), 'present', 'Checked in')
-       ON DUPLICATE KEY UPDATE check_in = COALESCE(check_in, NOW()), status = 'present', remarks = 'Checked in'`,
-      { employeeId: user.employee_id }
+       VALUES (:employeeId, :workDate, :checkedAt, 'present', 'Checked in')
+       ON DUPLICATE KEY UPDATE check_in = COALESCE(check_in, VALUES(check_in)), status = 'present', remarks = 'Checked in'`,
+      { employeeId: user.employee_id, workDate: now.date, checkedAt: now.datetime }
     );
     return ok(res, { message: "Checked in.", attendance: await todaysAttendance(user.employee_id) });
   }
 
   if (method === "POST" && pathName === "/api/attendance/check-out") {
+    const now = localNowParts();
+    const [existing] = await pool.execute(
+      "SELECT id, check_in FROM attendance WHERE employee_id = :employeeId AND work_date = :workDate",
+      { employeeId: user.employee_id, workDate: now.date }
+    );
+    if (!existing.length || !existing[0].check_in) {
+      throw new PublicError(400, "Please check in before checking out.");
+    }
     await pool.execute(
-      `INSERT INTO attendance (employee_id, work_date, check_in, check_out, status, remarks)
-       VALUES (:employeeId, CURRENT_DATE, NOW(), NOW(), 'present', 'Checked out')
-       ON DUPLICATE KEY UPDATE check_out = NOW(), remarks = 'Checked out'`,
-      { employeeId: user.employee_id }
+      `UPDATE attendance
+          SET check_out = :checkedAt, status = 'present', remarks = 'Checked out'
+        WHERE employee_id = :employeeId AND work_date = :workDate`,
+      { employeeId: user.employee_id, workDate: now.date, checkedAt: now.datetime }
     );
     return ok(res, { message: "Checked out.", attendance: await todaysAttendance(user.employee_id) });
   }
@@ -480,8 +549,8 @@ async function routeApi(req, res, url) {
       {
         employeeId: Number(body.employeeId),
         workDate: body.workDate,
-        checkIn: body.checkIn || null,
-        checkOut: body.checkOut || null,
+        checkIn: normalizeDateTimeInput(body.checkIn),
+        checkOut: normalizeDateTimeInput(body.checkOut),
         status: body.status,
         remarks: body.remarks || ""
       }
@@ -492,7 +561,13 @@ async function routeApi(req, res, url) {
   if (method === "GET" && pathName === "/api/leaves") {
     const admin = ["admin", "hr"].includes(user.role);
     const [rows] = await pool.execute(
-      `SELECT lr.*, e.full_name, u.employee_code
+      `SELECT lr.id, lr.employee_id, lr.leave_type,
+              DATE_FORMAT(lr.start_date, '%Y-%m-%d') AS start_date,
+              DATE_FORMAT(lr.end_date, '%Y-%m-%d') AS end_date,
+              lr.remarks, lr.status, lr.reviewer_comment, lr.reviewed_by,
+              DATE_FORMAT(lr.reviewed_at, '%Y-%m-%d %H:%i:%s') AS reviewed_at,
+              DATE_FORMAT(lr.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              e.full_name, u.employee_code
          FROM leave_requests lr
          JOIN employees e ON e.id = lr.employee_id
          JOIN users u ON u.id = e.user_id
@@ -556,7 +631,10 @@ async function routeApi(req, res, url) {
   if (method === "GET" && pathName === "/api/payroll") {
     const employeeId = getVisibleEmployeeId(url, user);
     const [rows] = await pool.execute(
-      `SELECT p.*, e.full_name, u.employee_code,
+      `SELECT p.id, p.employee_id, p.basic, p.hra, p.allowances, p.deductions,
+              DATE_FORMAT(p.effective_from, '%Y-%m-%d') AS effective_from,
+              DATE_FORMAT(p.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
+              e.full_name, u.employee_code,
               (p.basic + p.hra + p.allowances - p.deductions) AS net_salary
          FROM payroll p
          JOIN employees e ON e.id = p.employee_id
@@ -611,7 +689,9 @@ function getVisibleEmployeeId(url, user) {
 
 async function getProfile(employeeId) {
   const [rows] = await pool.execute(
-    `SELECT e.*, u.employee_code, u.email, u.role
+    `SELECT e.id, e.user_id, e.full_name, e.phone, e.address, e.department, e.designation,
+            DATE_FORMAT(e.joining_date, '%Y-%m-%d') AS joining_date,
+            e.profile_picture, e.documents, u.employee_code, u.email, u.role
        FROM employees e
        JOIN users u ON u.id = e.user_id
       WHERE e.id = :employeeId`,
@@ -638,15 +718,34 @@ async function updateProfile(employeeId, body, adminEdit) {
   await pool.execute(`UPDATE employees SET ${fields.join(", ")} WHERE id = :employeeId`, params);
 }
 
+async function saveProfilePhoto(fileName, dataUrl, employeeId) {
+  const match = String(dataUrl).match(/^data:image\/(png|jpe?g|webp|gif);base64,([A-Za-z0-9+/=]+)$/i);
+  if (!match) throw new PublicError(400, "Upload a valid image file.");
+
+  const ext = match[1].toLowerCase().replace("jpeg", "jpg");
+  const buffer = Buffer.from(match[2], "base64");
+  if (buffer.length > 5_000_000) throw new PublicError(400, "Profile photo must be 5 MB or smaller.");
+
+  const safeName = path.basename(String(fileName)).replace(/[^a-z0-9._-]/gi, "_").slice(0, 80) || "photo";
+  const storedName = `employee-${employeeId}-${Date.now()}-${safeName.replace(/\.(png|jpg|jpeg|webp|gif)$/i, "")}.${ext}`;
+  const diskPath = path.join(UPLOAD_DIR, storedName);
+  await fs.promises.writeFile(diskPath, buffer);
+  return `/uploads/${storedName}`;
+}
+
 async function getDashboard(user) {
   if (["admin", "hr"].includes(user.role)) {
+    const today = localNowParts().date;
     const [[employeeCount], [pendingLeaves], [todayPresent]] = await Promise.all([
       pool.query("SELECT COUNT(*) AS count FROM employees"),
       pool.query("SELECT COUNT(*) AS count FROM leave_requests WHERE status = 'Pending'"),
-      pool.query("SELECT COUNT(*) AS count FROM attendance WHERE work_date = CURRENT_DATE AND status = 'present'")
+      pool.execute("SELECT COUNT(*) AS count FROM attendance WHERE work_date = :today AND status = 'present'", { today })
     ]);
     const [recentLeaves] = await pool.query(
-      `SELECT lr.id, lr.status, lr.leave_type, lr.start_date, lr.end_date, e.full_name
+      `SELECT lr.id, lr.status, lr.leave_type,
+              DATE_FORMAT(lr.start_date, '%Y-%m-%d') AS start_date,
+              DATE_FORMAT(lr.end_date, '%Y-%m-%d') AS end_date,
+              e.full_name
          FROM leave_requests lr
          JOIN employees e ON e.id = lr.employee_id
         ORDER BY lr.created_at DESC
@@ -695,20 +794,27 @@ async function getDashboard(user) {
 }
 
 async function todaysAttendance(employeeId) {
+  const today = localNowParts().date;
   const [rows] = await pool.execute(
-    "SELECT * FROM attendance WHERE employee_id = :employeeId AND work_date = CURRENT_DATE",
-    { employeeId }
+    `SELECT id, employee_id,
+            DATE_FORMAT(work_date, '%Y-%m-%d') AS work_date,
+            DATE_FORMAT(check_in, '%Y-%m-%d %H:%i:%s') AS check_in,
+            DATE_FORMAT(check_out, '%Y-%m-%d %H:%i:%s') AS check_out,
+            status, remarks, updated_at
+       FROM attendance
+      WHERE employee_id = :employeeId AND work_date = :today`,
+    { employeeId, today }
   );
   return rows[0] || null;
 }
 
 async function markLeaveAttendance(leave) {
   const dates = [];
-  const current = new Date(`${toDateOnly(leave.start_date)}T00:00:00`);
-  const end = new Date(`${toDateOnly(leave.end_date)}T00:00:00`);
+  let current = toDateOnly(leave.start_date);
+  const end = toDateOnly(leave.end_date);
   while (current <= end) {
-    dates.push(current.toISOString().slice(0, 10));
-    current.setDate(current.getDate() + 1);
+    dates.push(current);
+    current = addDays(current, 1);
   }
 
   for (const workDate of dates) {
@@ -722,7 +828,7 @@ async function markLeaveAttendance(leave) {
 }
 
 function toDateOnly(value) {
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (value instanceof Date) return formatLocalDate(value);
   return String(value).slice(0, 10);
 }
 

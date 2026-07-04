@@ -308,6 +308,33 @@ label {
   align-items: center;
 }
 
+.photo-upload {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+}
+
+.profile-photo {
+  width: 92px;
+  height: 92px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #dbeafe;
+  color: var(--blue);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  font-size: 26px;
+  font-weight: 900;
+}
+
+.profile-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);

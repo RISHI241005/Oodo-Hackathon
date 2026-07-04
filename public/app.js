@@ -52,6 +52,14 @@ function dateOnly(value) {
   return value ? String(value).slice(0, 10) : "";
 }
 
+function localDateInput(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function timeOnly(value) {
+  return value ? String(value).slice(11, 19) : "-";
+}
+
 function initials(name) {
   return String(name || "HR").split(/\s+/).slice(0, 2).map(part => part[0]).join("").toUpperCase();
 }
@@ -63,6 +71,15 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Could not read the selected photo."));
+    reader.readAsDataURL(file);
+  });
 }
 
 async function boot() {
@@ -267,7 +284,10 @@ async function renderProfile() {
           <label>Joining Date <input name="joining_date" type="date" value="${dateOnly(p.joining_date)}" ${readonly ? "disabled" : ""}></label>
         </div>
         <label>Address <textarea name="address">${escapeHtml(p.address)}</textarea></label>
-        <label>Profile Picture URL <input name="profile_picture" value="${escapeHtml(p.profile_picture)}"></label>
+        <div class="photo-upload">
+          <div class="profile-photo">${p.profile_picture ? `<img src="${escapeHtml(p.profile_picture)}" alt="Profile photo">` : `<span>${escapeHtml(initials(p.full_name))}</span>`}</div>
+          <label>Profile Photo <input name="profile_photo" type="file" accept="image/*"></label>
+        </div>
         ${isAdmin() ? `<label>Documents <textarea name="documents">${escapeHtml(p.documents || "")}</textarea></label>` : ""}
         <button type="submit">Save Profile</button>
       </form>
@@ -279,7 +299,7 @@ async function renderAttendance() {
   const employeeId = isAdmin() ? state.selectedEmployeeId : state.user.employeeId;
   const now = new Date();
   const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+  const end = localDateInput(new Date(now.getFullYear(), now.getMonth() + 1, 0));
   const data = await api(`/api/attendance?employeeId=${employeeId}&start=${start}&end=${end}`);
   return `
     <div class="page-title">
@@ -288,7 +308,8 @@ async function renderAttendance() {
     </div>
     <section class="panel">
       <div class="toolbar">
-        ${!isAdmin() ? `<button data-action="check-in">Check In</button><button class="secondary" data-action="check-out">Check Out</button>` : ""}
+        <button data-action="check-in">${isAdmin() ? "My Check In" : "Check In"}</button>
+        <button class="secondary" data-action="check-out">${isAdmin() ? "My Check Out" : "Check Out"}</button>
       </div>
       ${calendar(now, data.attendance)}
     </section>
@@ -307,7 +328,7 @@ function adminAttendanceForm(employeeId) {
       <form class="form-grid" data-form="attendance">
         <input type="hidden" name="employeeId" value="${employeeId}">
         <div class="two">
-          <label>Date <input name="workDate" type="date" value="${new Date().toISOString().slice(0, 10)}" required></label>
+          <label>Date <input name="workDate" type="date" value="${localDateInput()}" required></label>
           <label>Status
             <select name="status">
               <option value="present">Present</option>
@@ -352,8 +373,8 @@ function calendar(monthDate, records) {
 function attendanceTable(rows) {
   return table(["Date", "In", "Out", "Status", "Remarks"], rows.map(row => [
     dateOnly(row.work_date),
-    row.check_in ? String(row.check_in).slice(11, 19) : "-",
-    row.check_out ? String(row.check_out).slice(11, 19) : "-",
+    timeOnly(row.check_in),
+    timeOnly(row.check_out),
     chip(row.status),
     row.remarks || "-"
   ]));
@@ -365,7 +386,7 @@ async function renderLeave() {
     <div class="page-title">
       <div><h1>Leave</h1><div class="muted">${isAdmin() ? "Approval workflow" : "Requests and status"}</div></div>
     </div>
-    ${!isAdmin() ? leaveForm() : ""}
+    ${leaveForm()}
     <section class="panel">
       <h2>${isAdmin() ? "All Requests" : "My Requests"}</h2>
       ${leaveTable(data.leaves)}
@@ -527,12 +548,14 @@ document.addEventListener("click", async event => {
 
     if (action.dataset.action === "check-in") {
       const data = await api("/api/attendance/check-in", { method: "POST" });
+      state.selectedEmployeeId = state.user.employeeId;
       notify(data.message);
       await renderTab();
     }
 
     if (action.dataset.action === "check-out") {
       const data = await api("/api/attendance/check-out", { method: "POST" });
+      state.selectedEmployeeId = state.user.employeeId;
       notify(data.message);
       await renderTab();
     }
@@ -588,8 +611,19 @@ document.addEventListener("submit", async event => {
 
     if (form.dataset.form === "profile") {
       const employeeId = isAdmin() ? state.selectedEmployeeId : state.user.employeeId;
+      const photoFile = form.elements.profile_photo?.files?.[0] || null;
+      delete body.profile_photo;
       const data = await api(`/api/profile?employeeId=${employeeId}`, { method: "PATCH", body });
-      notify(data.message);
+      let message = data.message;
+      if (photoFile) {
+        const dataUrl = await fileToDataUrl(photoFile);
+        const upload = await api(`/api/profile/photo?employeeId=${employeeId}`, {
+          method: "POST",
+          body: { fileName: photoFile.name, dataUrl }
+        });
+        message = upload.message;
+      }
+      notify(message);
       await loadEmployees();
       await renderTab();
     }
