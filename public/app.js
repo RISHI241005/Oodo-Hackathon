@@ -11,12 +11,12 @@ const state = {
 };
 
 const tabs = [
-  ["dashboard", "Dashboard"],
-  ["profile", "Profile"],
-  ["attendance", "Attendance"],
-  ["leave", "Leave"],
-  ["payroll", "Payroll"],
-  ["employees", "Employees"]
+  ["dashboard", "Dashboard", "DB"],
+  ["profile", "Profile", "PF"],
+  ["attendance", "Attendance", "AT"],
+  ["leave", "Leave", "LV"],
+  ["payroll", "Payroll", "PY"],
+  ["employees", "Employees", "EM"]
 ];
 
 function isAdmin() {
@@ -117,8 +117,11 @@ function renderAuth(mode) {
         ${mode === "signin" ? signinForm() : signupForm()}
       </section>
       <section class="auth-visual">
-        <h1>Every workday, perfectly aligned.</h1>
-        <p>Profiles, attendance, leave approvals, and payroll stay connected through live API calls and MySQL updates.</p>
+        <div class="auth-copy">
+          <span class="eyebrow">Human Resource Management System</span>
+          <h1>Every workday, perfectly aligned.</h1>
+          <p>Profiles, attendance, leave approvals, and payroll stay connected through live API calls and MySQL updates.</p>
+        </div>
       </section>
     </main>
   `;
@@ -171,15 +174,16 @@ function renderShell() {
           <div class="avatar">${escapeHtml(initials(state.user.fullName))}</div>
           <div>
             <strong>${escapeHtml(state.user.fullName)}</strong>
-            <div class="muted">${escapeHtml(state.user.employeeCode)} - ${escapeHtml(state.user.role.toUpperCase())}</div>
+            <div class="muted">${escapeHtml(state.user.employeeCode)} <span class="role-pill">${escapeHtml(state.user.role.toUpperCase())}</span></div>
           </div>
           <button class="secondary" data-action="signout">Sign Out</button>
         </div>
       </header>
       <div class="workspace">
         <aside class="sidebar">
+          <div class="sidebar-title">Workspace</div>
           <nav class="nav">
-            ${availableTabs.map(([id, label]) => `<button class="${state.activeTab === id ? "active" : ""}" data-tab="${id}">${label}</button>`).join("")}
+            ${availableTabs.map(([id, label, code]) => `<button class="${state.activeTab === id ? "active" : ""}" data-tab="${id}"><span>${code}</span>${label}</button>`).join("")}
           </nav>
         </aside>
         <main class="content" id="content"></main>
@@ -496,7 +500,7 @@ async function renderEmployees() {
 }
 
 function table(headers, rows) {
-  if (!rows.length) return `<div class="muted">No records yet.</div>`;
+  if (!rows.length) return `<div class="empty-state"><strong>No records yet</strong><span>New activity will appear here automatically.</span></div>`;
   return `
     <div class="table-wrap">
       <table>
@@ -514,7 +518,7 @@ function tableCell(value) {
 }
 
 function chip(value) {
-  return `<span class="status ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
+  return `<span class="status ${escapeHtml(value)}"><i></i>${escapeHtml(value)}</span>`;
 }
 
 function formData(form) {
