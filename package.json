@@ -1,0 +1,16 @@
+{
+  "name": "hrms-fullstack",
+  "version": "1.0.0",
+  "description": "Full-stack Human Resource Management System with live MySQL updates.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
